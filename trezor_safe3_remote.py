@@ -11,6 +11,7 @@ Voraussetzung: der Emulator (`./emu.py`) muss bereits laufen.
 """
 import tkinter as tk
 from trezorlib.transport import get_transport
+from trezorlib import models
 from trezorlib.debuglink import DebugLink
 
 TRANSPORT_PATH = "udp:127.0.0.1:21325"
@@ -19,7 +20,8 @@ TRANSPORT_PATH = "udp:127.0.0.1:21325"
 def main():
     transport = get_transport(TRANSPORT_PATH)
     debuglink = DebugLink(transport)
-    debuglink.open()
+    debuglink.model = models.by_internal_name("T2B1")
+    pass  # trezorlib >= 0.20 oeffnet bereits im Konstruktor
 
     root = tk.Tk()
     root.title("Trezor Safe 3 - Virtuelles Bedienfeld")
@@ -30,7 +32,7 @@ def main():
     def show_layout():
         try:
             layout = debuglink.read_layout()
-            status_var.set(str(layout)[:200])
+            status_var.set(layout.visible_screen()[:200])
         except Exception as e:
             status_var.set(f"Fehler beim Lesen: {e}")
 

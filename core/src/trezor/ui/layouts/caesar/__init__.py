@@ -2438,16 +2438,13 @@ async def request_pin_on_host(
     wrong_pin: bool = False,
     matrix_type: "int | None" = None,
 ) -> str:
-    from trezor import wire
+    from trezor import wire, workflow
+    from trezor.crypto import random
     from trezor.enums import PinMatrixRequestType
     from trezor.messages import PinMatrixAck, PinMatrixRequest
     from trezor.wire.context import call
-    from trezor.crypto import random
 
-    if matrix_type is None:
-        request_type = PinMatrixRequestType.Current
-    else:
-        request_type = matrix_type
+    request_type = PinMatrixRequestType.Current if matrix_type is None else matrix_type
 
     digits = list("123456789")
     for i in range(len(digits) - 1, 0, -1):
@@ -2455,27 +2452,32 @@ async def request_pin_on_host(
         digits[i], digits[j] = digits[j], digits[i]
     scramble = "".join(digits)
 
-    # pinmatrix_draw() equivalent -- simple text rendering standing in for
-    # the real bitmap/grid UI a production version would need. Renders the
-    # 3x3 layout as plain text using the fixed numpad row order (matching
-    # the legacy layout: 7 8 9 / 4 5 6 / 1 2 3), with the actual scrambled
-    # digit shown at each position.
+    # Numpad order like legacy pinmatrix: 7 8 9 / 4 5 6 / 1 2 3
     row789 = "           " + "   ".join(scramble[6:9])
     row456 = "           " + "   ".join(scramble[3:6])
     row123 = "           " + "   ".join(scramble[0:3])
     matrix_text = f"\n{row789}\n\n{row456}\n\n{row123}"
-    show_wait_text(matrix_text)
 
-    ack = await call(
-        PinMatrixRequest(type=request_type),
-        PinMatrixAck,
-    )
+    async def _show_matrix() -> None:
+        await interact_simple(trezorui_api.show_simple(title=None, text=matrix_text))
+
+    display = workflow.spawn(_show_matrix())
+    try:
+        ack = await call(PinMatrixRequest(type=request_type), PinMatrixAck)
+    except wire.ActionCancelled:
+        raise wire.PinCancelled
+    finally:
+        display.close()
+
     positions = ack.pin
-    if not positions or any(d not in "123456789" for d in positions):
+    if (
+        not positions
+        or len(positions) > 50
+        or any(d not in "123456789" for d in positions)
+    ):
         raise wire.ProcessError("Invalid PIN matrix response")
 
-    real_pin = "".join(scramble[int(p) - 1] for p in positions)
-    return real_pin
+    return "".join(scramble[int(p) - 1] for p in positions)
 
 
 def confirm_reenter_pin(is_wipe_code: bool = False) -> Awaitable[None]:
