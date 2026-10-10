@@ -2431,6 +2431,53 @@ async def request_pin_on_device(
     return result  # type: ignore ["UiResult" is not assignable to "str"]
 
 
+async def request_pin_on_host(
+    prompt: str,
+    attempts_remaining: int | None,
+    allow_cancel: bool,
+    wrong_pin: bool = False,
+    matrix_type: "int | None" = None,
+) -> str:
+    from trezor import wire
+    from trezor.enums import PinMatrixRequestType
+    from trezor.messages import PinMatrixAck, PinMatrixRequest
+    from trezor.wire.context import call
+    from trezor.crypto import random
+
+    if matrix_type is None:
+        request_type = PinMatrixRequestType.Current
+    else:
+        request_type = matrix_type
+
+    digits = list("123456789")
+    for i in range(len(digits) - 1, 0, -1):
+        j = random.uniform(i + 1)
+        digits[i], digits[j] = digits[j], digits[i]
+    scramble = "".join(digits)
+
+    # pinmatrix_draw() equivalent -- simple text rendering standing in for
+    # the real bitmap/grid UI a production version would need. Renders the
+    # 3x3 layout as plain text using the fixed numpad row order (matching
+    # the legacy layout: 7 8 9 / 4 5 6 / 1 2 3), with the actual scrambled
+    # digit shown at each position.
+    row789 = "           " + "   ".join(scramble[6:9])
+    row456 = "           " + "   ".join(scramble[3:6])
+    row123 = "           " + "   ".join(scramble[0:3])
+    matrix_text = f"\n{row789}\n\n{row456}\n\n{row123}"
+    show_wait_text(matrix_text)
+
+    ack = await call(
+        PinMatrixRequest(type=request_type),
+        PinMatrixAck,
+    )
+    positions = ack.pin
+    if not positions or any(d not in "123456789" for d in positions):
+        raise wire.ProcessError("Invalid PIN matrix response")
+
+    real_pin = "".join(scramble[int(p) - 1] for p in positions)
+    return real_pin
+
+
 def confirm_reenter_pin(is_wipe_code: bool = False) -> Awaitable[None]:
     br_name = "reenter_wipe_code" if is_wipe_code else "reenter_pin"
     title = TR.wipe_code__title_check if is_wipe_code else TR.pin__title_check_pin

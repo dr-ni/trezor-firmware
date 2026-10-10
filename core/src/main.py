@@ -36,10 +36,19 @@ import trezor.pin  # noqa: F401
 # usb imports trezor.utils and trezor.io which is a C module
 import usb
 
-# unlock the device, unload the boot module afterwards
+# PROTOTYPE: skip full boot.py (which blocks here until PIN is entered
+# on-device) so USB can open first, allowing PIN entry via host
+# (PinMatrixRequest) once a session actually needs it, instead of at
+# boot time before USB is even active. See boot.py for what this
+# bypasses (bootscreen(), pin_unlock_sequence(), the boot-time loop.run()).
 with utils.unimport():
-    import boot
-    del boot
+    from trezor import config, translations
+    from trezor.pin import show_pin_timeout, allow_all_loader_messages
+
+    config.init(show_pin_timeout)
+    translations.init()
+    allow_all_loader_messages()
+    del config, translations, show_pin_timeout, allow_all_loader_messages
 
 # start the USB
 import storage.device

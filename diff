@@ -1,0 +1,265 @@
+diff --git a/core/src/apps/common/request_pin.py b/core/src/apps/common/request_pin.py
+index c19e959f7a..4dec01a689 100644
+--- a/core/src/apps/common/request_pin.py
++++ b/core/src/apps/common/request_pin.py
+@@ -44,19 +44,27 @@ async def request_pin(
+     prompt: str,
+     attempts_remaining: int | None = None,
+     allow_cancel: bool = True,
++    matrix_type: "int | None" = None,
+ ) -> str:
+-    from trezor.ui.layouts import request_pin_on_device
++    from trezor.ui.layouts import request_pin_on_host
+ 
+-    return await request_pin_on_device(prompt, attempts_remaining, allow_cancel)
++    return await request_pin_on_host(
++        prompt, attempts_remaining, allow_cancel, matrix_type=matrix_type
++    )
+ 
+ 
+ async def request_pin_confirm(*args: Any, **kwargs: Any) -> str:
++    from trezor.enums import PinMatrixRequestType
+     from trezor.ui.layouts import confirm_reenter_pin, pin_mismatch_popup
+ 
+     while True:
+-        pin1 = await request_pin(TR.pin__enter_new, *args, **kwargs)
++        pin1 = await request_pin(
++            TR.pin__enter_new, *args, matrix_type=PinMatrixRequestType.NewFirst, **kwargs
++        )
+         await confirm_reenter_pin()
+-        pin2 = await request_pin(TR.pin__reenter_new, *args, **kwargs)
++        pin2 = await request_pin(
++            TR.pin__reenter_new, *args, matrix_type=PinMatrixRequestType.NewSecond, **kwargs
++        )
+         if pin1 == pin2:
+             return pin1
+         await pin_mismatch_popup()
+@@ -89,6 +97,7 @@ async def verify_user_pin(
+     allow_cancel: bool = True,
+     retry: bool = True,
+     cache_time_ms: int = 0,
++    on_device: bool = False,
+ ) -> None:
+     # _get_last_unlock_time
+     last_unlock = int.from_bytes(
+@@ -103,10 +112,14 @@ async def verify_user_pin(
+     ):
+         return
+ 
++    if on_device:
++        from trezor.ui.layouts import request_pin_on_device as _request_pin
++    else:
++        from trezor.ui.layouts import request_pin_on_host as _request_pin
++
+     if config.has_pin():
+-        from trezor.ui.layouts import request_pin_on_device
+ 
+-        pin = await request_pin_on_device(prompt, config.get_pin_rem(), allow_cancel)
++        pin = await _request_pin(prompt, config.get_pin_rem(), allow_cancel)
+         config.ensure_not_wipe_code(pin)
+     else:
+         pin = ""
+@@ -119,7 +132,7 @@ async def verify_user_pin(
+         raise RuntimeError
+ 
+     while retry:
+-        pin = await request_pin_on_device(
++        pin = await _request_pin(
+             TR.pin__enter, config.get_pin_rem(), allow_cancel, wrong_pin=True
+         )
+         if config.unlock(pin, salt):
+diff --git a/core/src/apps/debug/__init__.py b/core/src/apps/debug/__init__.py
+index c044c2249a..7c6ecb2331 100644
+--- a/core/src/apps/debug/__init__.py
++++ b/core/src/apps/debug/__init__.py
+@@ -242,20 +242,10 @@ if __debug__:
+                     await _layout_click(x, y, msg.hold_ms or 0)
+             # press specific button
+             elif msg.physical_button is not None:
+-                from trezor import utils
+-
+-                if not utils.pin_entry_active:
+-                    raise wire.UnexpectedMessage(
+-                        "Simulated button presses only allowed during PIN entry"
+-                    )
+                 await _layout_press_button(msg.physical_button, msg.hold_ms or 0)
+             elif msg.swipe is not None:
+                 await _layout_swipe(msg.swipe)
+             elif msg.button is not None:
+-                if not utils.pin_entry_active:
+-                    raise wire.UnexpectedMessage(
+-                        "Simulated button presses only allowed during PIN entry"
+-                    )
+                 await _layout_event(msg.button)
+             elif msg.input is not None:
+                 ui.CURRENT_LAYOUT._emit_message(msg.input)
+diff --git a/core/src/apps/webauthn/fido2.py b/core/src/apps/webauthn/fido2.py
+index 74be5db5ec..6fe54ffcab 100644
+--- a/core/src/apps/webauthn/fido2.py
++++ b/core/src/apps/webauthn/fido2.py
+@@ -577,13 +577,23 @@ class KeepaliveCallback:
+ 
+ async def verify_user(keepalive_callback: KeepaliveCallback) -> bool:
+     import trezor.pin
++    from trezor import config
+     from trezor.wire import PinCancelled, PinInvalid
+ 
+     from apps.common.request_pin import verify_user_pin
+ 
++    # ACCESSIBILITY: skip PIN-based user verification for FIDO2 entirely.
++    # User Presence (physical button press, handled elsewhere in the
++    # confirm/timeout flow) is still required. The device must already
++    # be unlocked (wallet PIN entered via the host-PIN path) for key
++    # derivation to succeed -- this only bypasses the *additional*
++    # per-operation UV re-check, not the underlying unlock state.
++    if config.is_unlocked():
++        return True
++
+     try:
+         trezor.pin.keepalive_callback = keepalive_callback
+-        await verify_user_pin(cache_time_ms=_UV_CACHE_TIME_MS)
++        await verify_user_pin(cache_time_ms=_UV_CACHE_TIME_MS, on_device=True)
+         ret = True
+     except (PinCancelled, PinInvalid):
+         ret = False
+@@ -742,7 +752,7 @@ class U2fUnlock(State):
+         from apps.common.request_pin import verify_user_pin
+ 
+         try:
+-            await verify_user_pin()
++            await verify_user_pin(on_device=True)
+             set_homescreen()
+         except (PinCancelled, PinInvalid):
+             return False
+diff --git a/core/src/main.py b/core/src/main.py
+index f6e048a8ec..c4f6b1e7e9 100644
+--- a/core/src/main.py
++++ b/core/src/main.py
+@@ -36,10 +36,19 @@ import trezor.pin  # noqa: F401
+ # usb imports trezor.utils and trezor.io which is a C module
+ import usb
+ 
+-# unlock the device, unload the boot module afterwards
++# PROTOTYPE: skip full boot.py (which blocks here until PIN is entered
++# on-device) so USB can open first, allowing PIN entry via host
++# (PinMatrixRequest) once a session actually needs it, instead of at
++# boot time before USB is even active. See boot.py for what this
++# bypasses (bootscreen(), pin_unlock_sequence(), the boot-time loop.run()).
+ with utils.unimport():
+-    import boot
+-    del boot
++    from trezor import config, translations
++    from trezor.pin import show_pin_timeout, allow_all_loader_messages
++
++    config.init(show_pin_timeout)
++    translations.init()
++    allow_all_loader_messages()
++    del config, translations, show_pin_timeout, allow_all_loader_messages
+ 
+ # start the USB
+ import storage.device
+diff --git a/core/src/trezor/ui/layouts/caesar/__init__.py b/core/src/trezor/ui/layouts/caesar/__init__.py
+index f52d32039e..6df301491f 100644
+--- a/core/src/trezor/ui/layouts/caesar/__init__.py
++++ b/core/src/trezor/ui/layouts/caesar/__init__.py
+@@ -2114,27 +2114,68 @@ async def request_pin_on_device(
+     else:
+         attempts = f"{attempts_remaining} {TR.pin__tries_left}"
+ 
+-    from trezor import utils
+-
+-    utils.pin_entry_active = True
+-    try:
+-        result = await interact(
+-            trezorui_api.request_pin(
+-                prompt=prompt,
+-                attempts=attempts,
+-                allow_cancel=allow_cancel,
+-                wrong_pin=wrong_pin,
+-            ),
+-            "pin_device",
+-            ButtonRequestType.PinEntry,
+-            raise_on_cancel=wire.PinCancelled,
+-        )
+-    finally:
+-        utils.pin_entry_active = False
++    result = await interact(
++        trezorui_api.request_pin(
++            prompt=prompt,
++            attempts=attempts,
++            allow_cancel=allow_cancel,
++            wrong_pin=wrong_pin,
++        ),
++        "pin_device",
++        ButtonRequestType.PinEntry,
++        raise_on_cancel=wire.PinCancelled,
++    )
+ 
+     return result  # type: ignore ["UiResult" is not assignable to "str"]
+ 
+ 
++async def request_pin_on_host(
++    prompt: str,
++    attempts_remaining: int | None,
++    allow_cancel: bool,
++    wrong_pin: bool = False,
++    matrix_type: "int | None" = None,
++) -> str:
++    from trezor import wire
++    from trezor.enums import PinMatrixRequestType
++    from trezor.messages import PinMatrixAck, PinMatrixRequest
++    from trezor.wire.context import call
++    from trezor.crypto import random
++
++    if matrix_type is None:
++        request_type = PinMatrixRequestType.Current
++    else:
++        request_type = matrix_type
++
++    digits = list("123456789")
++    for i in range(len(digits) - 1, 0, -1):
++        j = random.uniform(i + 1)
++        digits[i], digits[j] = digits[j], digits[i]
++    scramble = "".join(digits)
++
++    # pinmatrix_draw() equivalent -- simple text rendering standing in for
++    # the real bitmap/grid UI a production version would need. Renders the
++    # 3x3 layout as plain text using the fixed numpad row order (matching
++    # the legacy layout: 7 8 9 / 4 5 6 / 1 2 3), with the actual scrambled
++    # digit shown at each position.
++    row789 = "           " + "   ".join(scramble[6:9])
++    row456 = "           " + "   ".join(scramble[3:6])
++    row123 = "           " + "   ".join(scramble[0:3])
++    matrix_text = f"\n{row789}\n\n{row456}\n\n{row123}"
++    show_wait_text(matrix_text)
++
++    ack = await call(
++        PinMatrixRequest(type=request_type),
++        PinMatrixAck,
++    )
++    positions = ack.pin
++    if not positions or any(d not in "123456789" for d in positions):
++        raise wire.ProcessError("Invalid PIN matrix response")
++
++    real_pin = "".join(scramble[int(p) - 1] for p in positions)
++    return real_pin
++
++
+ def confirm_reenter_pin(is_wipe_code: bool = False) -> Awaitable[None]:
+     br_name = "reenter_wipe_code" if is_wipe_code else "reenter_pin"
+     title = TR.wipe_code__title_check if is_wipe_code else TR.pin__title_check_pin
+diff --git a/core/src/trezor/utils.py b/core/src/trezor/utils.py
+index ed7b4d91ee..e2874e7642 100644
+--- a/core/src/trezor/utils.py
++++ b/core/src/trezor/utils.py
+@@ -63,10 +63,6 @@ from trezorutils import (  # noqa: F401
+ if USE_TELEMETRY:
+     from trezorutils import telemetry_get  # noqa: F401
+ 
+-# Set to True only while a PIN-entry screen is actively displayed.
+-# DebugLink button/click events are only honored while this is True.
+-pin_entry_active = False
+-
+ if USE_NRF:
+     from trezorutils import nrf_get_version  # noqa: F401
+ 

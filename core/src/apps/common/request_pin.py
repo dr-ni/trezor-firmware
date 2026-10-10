@@ -33,19 +33,27 @@ async def request_pin(
     prompt: str,
     attempts_remaining: int | None = None,
     allow_cancel: bool = True,
+    matrix_type: "int | None" = None,
 ) -> str:
-    from trezor.ui.layouts import request_pin_on_device
+    from trezor.ui.layouts import request_pin_on_host
 
-    return await request_pin_on_device(prompt, attempts_remaining, allow_cancel)
+    return await request_pin_on_host(
+        prompt, attempts_remaining, allow_cancel, matrix_type=matrix_type
+    )
 
 
 async def request_pin_confirm(*args: Any, **kwargs: Any) -> str:
+    from trezor.enums import PinMatrixRequestType
     from trezor.ui.layouts import confirm_reenter_pin, pin_mismatch_popup
 
     while True:
-        pin1 = await request_pin(TR.pin__enter_new, *args, **kwargs)
+        pin1 = await request_pin(
+            TR.pin__enter_new, *args, matrix_type=PinMatrixRequestType.NewFirst, **kwargs
+        )
         await confirm_reenter_pin()
-        pin2 = await request_pin(TR.pin__reenter_new, *args, **kwargs)
+        pin2 = await request_pin(
+            TR.pin__reenter_new, *args, matrix_type=PinMatrixRequestType.NewSecond, **kwargs
+        )
         if pin1 == pin2:
             return pin1
         await pin_mismatch_popup()
@@ -75,6 +83,7 @@ async def verify_user_pin(
     allow_cancel: bool = True,
     retry: bool = True,
     cache_time_ms: int = 0,
+    on_device: bool = False,
 ) -> None:
     if prompt is None:
         prompt = TR.pin__enter
@@ -92,10 +101,14 @@ async def verify_user_pin(
     ):
         return
 
-    if config.has_pin():
-        from trezor.ui.layouts import request_pin_on_device
+    if on_device:
+        from trezor.ui.layouts import request_pin_on_device as _request_pin
+    else:
+        from trezor.ui.layouts import request_pin_on_host as _request_pin
 
-        pin = await request_pin_on_device(prompt, config.get_pin_rem(), allow_cancel)
+    if config.has_pin():
+
+        pin = await _request_pin(prompt, config.get_pin_rem(), allow_cancel)
         config.ensure_not_wipe_code(pin)
     else:
         pin = ""
@@ -108,7 +121,7 @@ async def verify_user_pin(
         raise RuntimeError
 
     while retry:
-        pin = await request_pin_on_device(
+        pin = await _request_pin(
             TR.pin__enter, config.get_pin_rem(), allow_cancel, wrong_pin=True
         )
         if config.unlock(pin, salt):

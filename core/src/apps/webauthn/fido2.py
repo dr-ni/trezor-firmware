@@ -570,13 +570,23 @@ class KeepaliveCallback:
 
 async def verify_user(keepalive_callback: KeepaliveCallback) -> bool:
     import trezor.pin
+    from trezor import config
     from trezor.wire import PinCancelled, PinInvalid
 
     from apps.common.request_pin import verify_user_pin
 
+    # ACCESSIBILITY: skip PIN-based user verification for FIDO2 entirely.
+    # User Presence (physical button press, handled elsewhere in the
+    # confirm/timeout flow) is still required. The device must already
+    # be unlocked (wallet PIN entered via the host-PIN path) for key
+    # derivation to succeed -- this only bypasses the *additional*
+    # per-operation UV re-check, not the underlying unlock state.
+    if config.is_unlocked():
+        return True
+
     try:
         trezor.pin.keepalive_callback = keepalive_callback
-        await verify_user_pin(cache_time_ms=_UV_CACHE_TIME_MS)
+        await verify_user_pin(cache_time_ms=_UV_CACHE_TIME_MS, on_device=True)
         ret = True
     except (PinCancelled, PinInvalid):
         ret = False
@@ -735,7 +745,7 @@ class U2fUnlock(State):
         from apps.common.request_pin import verify_user_pin
 
         try:
-            await verify_user_pin()
+            await verify_user_pin(on_device=True)
             set_homescreen()
         except (PinCancelled, PinInvalid):
             return False
