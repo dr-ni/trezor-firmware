@@ -102,15 +102,17 @@ async def _request_wipe_code_confirm(pin: str) -> str:
         wipe_code_same_as_pin_popup,
     )
 
+    from trezor.enums import PinMatrixRequestType
+
     from apps.common.request_pin import request_pin
 
     while True:
-        code1 = await request_pin(TR.wipe_code__enter_new)
+        code1 = await request_pin(TR.wipe_code__enter_new, matrix_type=PinMatrixRequestType.WipeCodeFirst)
         if code1 == pin:
             await wipe_code_same_as_pin_popup()
             continue
         await confirm_reenter_pin(is_wipe_code=True)
-        code2 = await request_pin(TR.wipe_code__reenter)
+        code2 = await request_pin(TR.wipe_code__reenter, matrix_type=PinMatrixRequestType.WipeCodeSecond)
         if code1 == code2:
             return code1
         await pin_mismatch_popup(is_wipe_code=True)

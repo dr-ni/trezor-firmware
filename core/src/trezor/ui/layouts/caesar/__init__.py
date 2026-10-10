@@ -2442,7 +2442,15 @@ async def request_pin_on_host(
     from trezor.crypto import random
     from trezor.enums import PinMatrixRequestType
     from trezor.messages import PinMatrixAck, PinMatrixRequest
+    from trezor.wire import context
     from trezor.wire.context import call
+
+    # No host session (e.g. unlock from lockscreen after autolock):
+    # fall back to on-device PIN entry instead of raising NoWireContext.
+    if context.CURRENT_CONTEXT is None:
+        return await request_pin_on_device(
+            prompt, attempts_remaining, allow_cancel, wrong_pin
+        )
 
     request_type = PinMatrixRequestType.Current if matrix_type is None else matrix_type
 
